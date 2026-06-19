@@ -69,6 +69,29 @@ Not a fit:
 - **You want to share API keys alongside the agent.** `auth.json` and `.env` are deliberately excluded from distributions. Each installer brings their own credentials.
 - **You want to share memories / sessions / conversation history.** Those are user data, not distribution content. Never shipped.
 
+## What the application can and cannot protect
+
+:::caution
+**Hermes does not control git.** The exclusions described on this page are applied by the **installer** when someone runs `hermes profile install` or `hermes profile update`. They are **not** applied when you, the author, run `git add` or `git commit`.
+:::
+
+This is the single most important thing to understand about authoring a distribution:
+
+| What Hermes does | When it happens | Who it protects |
+|---|---|---|
+| Strips `auth.json`, `.env`, `memories/`, `sessions/`, `logs/`, etc. when copying files into an installer's profile directory | At **install / update** time, on the **installer's** machine | The **installer** — they will never receive those files |
+| Writes `.env.EXAMPLE` with required keys commented out | At install time, on the installer's machine | The installer — they know which keys to set |
+| Preserves the installer's own `memories/`, `sessions/`, `config.yaml` overrides across updates | At update time, on the installer's machine | The installer — their customizations survive |
+
+| What Hermes does **not** do | Why it matters to you |
+|---|---|
+| **Does not prevent you from committing secrets to your git repo.** | If you run `git add .` in a profile directory that contains `.env`, `auth.json`, or `memories/`, git will commit them. Hermes has no hook into git and cannot stop this. |
+| **Does not remove secrets from your git history.** | Once committed and pushed, secrets are in the repo history. The installer will strip them from the working tree it copies, but anyone who can browse your repo on GitHub can read them in the commit history. |
+| **Does not create a `.gitignore` for you.** | You are responsible for creating one before the first `git add`. See the recommended template below. |
+| **Does not warn you at push time.** | There is no pre-push check. The only protection is your `.gitignore` and your own review. |
+
+**Bottom line for authors:** the safety guard that protects *installers* does not protect *you*. You must keep secrets out of your git repo yourself — and the way you do that is a `.gitignore` file, created before the first commit.
+
 ## The lifecycle: author to installer to update
 
 Below is the full end-to-end flow. Pick the side you care about.
@@ -116,25 +139,69 @@ env_requires:
 
 That's the whole manifest. Every field except `name` has a sensible default.
 
-### Step 3 — Push to a git repo
+### Step 3 — Create a `.gitignore` before the first commit
+
+:::warning
+Do this **before** running `git init` or `git add`. If you have already chatted with the profile, run setup, or otherwise used it, the directory now contains files you must not ship: `.env`, `auth.json`, `memories/`, `sessions/`, `state.db*`, `logs/`, and more. A `.gitignore` is the only thing standing between those files and your public git history.
+:::
+
+Create `~/.hermes/profiles/research-bot/.gitignore` with at minimum:
+
+```gitignore
+# Secrets — never commit these. Hermes cannot undo a committed secret.
+auth.json
+.env
+.env.*
+!.env.EXAMPLE
+
+# User data — private to each machine, never part of a distribution.
+memories/
+sessions/
+state.db
+state.db-shm
+state.db-wal
+logs/
+workspace/
+plans/
+home/
+
+# Caches and local customization.
+*_cache/
+local/
+
+# OS / editor cruft.
+.DS_Store
+*.swp
+```
+
+This mirrors the [hard-excluded paths](#whats-not-in-a-distribution-ever) that the installer strips on its end, so you and the installer agree on what is and isn't distribution content. Anything else you want to keep out of the repo (scratch files, large assets, local-only skills) should also go in here.
+
+You can also create this file *immediately after `hermes profile create`* and before the profile is ever used — at that point `memories/`, `sessions/`, `.env`, and `logs/` do not yet exist, so even a bare `git add .` would not pick them up. But relying on timing is fragile; the `.gitignore` is the durable fix.
+
+### Step 4 — Push to a git repo
 
 ```bash
 cd ~/.hermes/profiles/research-bot
 git init
 git add .
+git status                    # REVIEW THIS. Confirm no .env, auth.json, memories/, sessions/.
 git commit -m "v1.0.0"
 git remote add origin git@github.com:you/research-bot.git
 git tag v1.0.0
 git push -u origin main --tags
 ```
 
+:::note
+`git add .` is safe here **only because** the `.gitignore` from Step 3 is in place. Without it, `git add .` would stage `.env`, `auth.json`, `memories/`, `sessions/`, and every other user-data file present in the directory. Always review `git status` before committing.
+:::
+
 The repo is now a distribution. Anyone with access can install it.
 
 :::note
-The git repo contains **everything in the profile directory except things already excluded from distributions**: `auth.json`, `.env`, `memories/`, `sessions/`, `state.db*`, `logs/`, `workspace/`, `*_cache/`, `local/`. Those stay on your machine. You can also add a `.gitignore` if you want to exclude additional paths.
+The installer will additionally strip the [hard-excluded paths](#whats-not-in-a-distribution-ever) even if an author somehow ships them — but that only protects installers, not the author's repo history. Keep secrets out of the repo in the first place.
 :::
 
-### Step 4 — Tag versioned releases
+### Step 5 — Tag versioned releases
 
 Every time the agent reaches a stable point, bump the version and tag:
 
@@ -154,17 +221,18 @@ A complete authored distribution:
 
 ```
 research-bot/
-├── distribution.yaml            # required
-├── SOUL.md                      # strongly recommended
-├── config.yaml                  # model, provider, tool defaults
-├── mcp.json                     # MCP server connections
+├── .gitignore                  # excludes secrets & user data (see Step 3)
+├── distribution.yaml           # required
+├── SOUL.md                     # strongly recommended
+├── config.yaml                 # model, provider, tool defaults
+├── mcp.json                    # MCP server connections
 ├── skills/
 │   ├── arxiv-search/SKILL.md
 │   ├── paper-summarization/SKILL.md
 │   └── citation-lookup/SKILL.md
 ├── cron/
-│   └── weekly-digest.json       # scheduled tasks
-└── README.md                    # human-facing description (optional)
+│   └── weekly-digest.json      # scheduled tasks
+└── README.md                   # human-facing description (optional)
 ```
 
 ### Distribution-owned vs user-owned
@@ -204,7 +272,7 @@ What happens:
 2. Reads `distribution.yaml`, shows you the manifest (name, version, description, author, required env vars).
 3. Checks each required env var against your shell environment and the target profile's existing `.env`. Marks each as `✓ set` or `needs setting` so you know exactly what to configure.
 4. Asks for confirmation. Pass `-y` / `--yes` to skip.
-5. Copies distribution-owned files into `~/.hermes/profiles/research-bot/` (or wherever the manifest's `name` resolves).
+5. Copies distribution-owned files into `~/.hermes/profiles/research-bot/` (or wherever the manifest's `name` resolves). The [hard-excluded paths](#whats-not-in-a-distribution-ever) are stripped during this copy, even if the author accidentally left them in the repo.
 6. Writes `.env.EXAMPLE` with the required keys commented out — copy to `.env` and fill in.
 7. With `--alias`, creates a wrapper so you can run `research-bot chat` directly.
 
@@ -253,11 +321,11 @@ After install, the agent's profile contains a `.env.EXAMPLE`:
 
 # OpenAI API key (for model access)
 # (required)
-OPENAI_API_KEY=
+OPENAI_API_KEY=***
 
 # SerpAPI key for web search
 # (optional)
-# SERPAPI_KEY=
+# SERPAPI_KEY=***
 ```
 
 Copy it:
@@ -295,7 +363,7 @@ Environment variables:
 
 ```
  Profile          Model                        Gateway      Alias        Distribution
- ───────────────    ───────────────────────────    ───────────    ───────────    ────────────────────
+ ───────────────  ───────────────────────────  ───────────  ───────────  ────────────────────
  ◆default         claude-sonnet-4              stopped      —            —
   coder           gpt-5                        stopped      coder        —
   research-bot    claude-opus-4                stopped      research-bot research-bot@1.0.0
@@ -351,9 +419,10 @@ So you never accidentally delete an agent without knowing where it came from or 
 You built a research assistant on your laptop. You want the same agent on your workstation.
 
 ```bash
-# Laptop
+# Laptop — create .gitignore first (see "For authors" Step 3), then:
 cd ~/.hermes/profiles/research-bot
-git init && git add . && git commit -m "initial"
+git init && git add . && git status   # confirm no secrets staged
+git commit -m "initial"
 git remote add origin git@github.com:you/research-bot.git
 git push -u origin main
 
@@ -369,10 +438,11 @@ Any iteration on the laptop (`git commit && push`) pulls onto the workstation wi
 Your engineering team wants a shared PR-review bot with a specific SOUL, specific skills, and a cron that runs every PR through it.
 
 ```bash
-# Engineering lead
+# Engineering lead — create .gitignore first (see "For authors" Step 3), then:
 cd ~/.hermes/profiles/pr-reviewer
 # ... build and tune ...
-git init && git add . && git commit -m "v1.0 PR reviewer"
+git init && git add . && git status   # confirm no secrets staged
+git commit -m "v1.0 PR reviewer"
 git tag v1.0.0
 git push -u origin main --tags    # push to your company's internal Git host
 
@@ -389,10 +459,11 @@ When the lead ships v1.1 (better SOUL, new skill), engineers run `hermes profile
 You built something novel — maybe a "Polymarket trader" or an "academic paper summarizer" or a "Minecraft server ops assistant." You want to share it.
 
 ```bash
-# You
+# You — create .gitignore first (see "For authors" Step 3), then:
 cd ~/.hermes/profiles/polymarket-trader
 # Write a solid README.md at the repo root — GitHub shows it on the repo page
-git init && git add . && git commit -m "v1.0"
+git init && git add . && git status   # confirm no secrets staged
+git commit -m "v1.0"
 git tag v1.0.0
 # Publish to a public GitHub repo
 git remote add origin https://github.com/you/hermes-polymarket-trader.git
@@ -437,7 +508,7 @@ Your customers install via a single command; the install preview tells them exac
 You're the ops lead. You want a temporary agent that diagnoses a production incident — a canned SOUL with the right tools and MCP connections — and runs on three on-call engineers' laptops for the next week.
 
 ```bash
-# You
+# You — create .gitignore first (see "For authors" Step 3), then:
 # Build the profile, commit, push a private repo
 git push -u origin main
 
@@ -505,6 +576,8 @@ hermes profile install github.com/yourname/forked-research-bot --alias
 # Upstream changes: pull them into your fork the usual way
 ```
 
+If you plan to push your fork back to your own GitHub repo, create a `.gitignore` in the profile directory just as an original author would (see "For authors" Step 3). The same caveat applies: Hermes will not stop you from committing secrets to your fork.
+
 ### Test a distribution before pushing
 
 From the author's machine:
@@ -522,7 +595,7 @@ hermes profile install ~/.hermes/profiles/research-bot --name research-bot-test
 
 ## What's NOT in a distribution (ever)
 
-The installer hard-excludes these paths even if an author accidentally ships them. No config option lets you override this — the safety guard is a regression-tested invariant:
+The installer hard-excludes these paths even if an author accidentally ships them in the repo. No config option lets you override this — the safety guard is a regression-tested invariant:
 
 - `auth.json` — OAuth tokens, platform credentials
 - `.env` — API keys, secrets
@@ -536,7 +609,11 @@ The installer hard-excludes these paths even if an author accidentally ships the
 - `*_cache/` — image / audio / document caches
 - `local/` — user-reserved customization namespace
 
-When you clone a distribution, these simply aren't there. When you update, they stay put. If you installed the same distribution on five machines, you have five isolated sets of this data — one per machine.
+When you clone a distribution as an installer, these simply aren't copied into your profile directory. When you update, your copies stay put. If you installed the same distribution on five machines, you have five isolated sets of this data — one per machine.
+
+:::caution
+This exclusion runs at **install / update time on the installer's machine**. It does **not** run on the author's machine when they run `git add` or `git commit`. If an author commits `.env` or `auth.json` to their repo, those secrets are in the git history and visible to anyone with repo access — even though installers will never receive them in their working tree. Authors must use a [`.gitignore`](#step-3--create-a-gitignore-before-the-first-commit) to keep secrets out of the repo in the first place.
+:::
 
 ## Security and trust
 
